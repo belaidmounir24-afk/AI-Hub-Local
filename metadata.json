@@ -1,0 +1,8 @@
+{
+  "name": "Remix VisionIA Chat",
+  "description": "Discutez avec une IA multimodale en partageant facilement vos images et vidéos via une interface mobile intuitive.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

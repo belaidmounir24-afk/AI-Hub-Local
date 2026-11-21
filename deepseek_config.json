@@ -1,0 +1,15 @@
+{
+  "provider": "deepseek",
+  "api_endpoint": "https://api.deepseek.com",
+  "model_name": "deepseek-chat",
+  "auth": {
+    "key_name": "DEEPSEEK_API_KEY",
+    "header": "Authorization",
+    "prefix": "Bearer"
+  },
+  "settings": {
+    "temperature": 0.7,
+    "max_tokens": 4096,
+    "optimization_mode": "agentic"
+  }
+}

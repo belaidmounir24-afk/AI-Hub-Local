@@ -1,0 +1,13 @@
+{
+  "system_config": {
+    "version": "1.0.0",
+    "mode": "Agentic_Native",
+    "active_frameworks": ["LangGraph", "MCP-Client"],
+    "performance_optimizations": {
+      "long_term_memory": "enabled",
+      "eval_loop": "active",
+      "vector_db_access": "Pinecone_Ready"
+    },
+    "instruction_priority": "Prioriser l'extraction structurée et l'exécution de tâches autonomes via le protocole MCP."
+  }
+}
