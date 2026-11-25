@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1b2d4a" />
+    </linearGradient>
+    <linearGradient id="sweep" x1="256" y1="70" x2="430" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.45" />
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0.05" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)" />
+  <circle cx="256" cy="256" r="190" stroke="#10b981" stroke-width="14" />
+  <circle cx="256" cy="256" r="136" stroke="#06b6d4" stroke-width="10" stroke-opacity="0.9" />
+  <path d="M256 256 L360 96 A190 190 0 0 1 446 256 Z" fill="url(#sweep)" />
+  <line x1="256" y1="62" x2="256" y2="152" stroke="#34d399" stroke-width="10" stroke-linecap="round" />
+  <line x1="256" y1="360" x2="256" y2="450" stroke="#34d399" stroke-width="10" stroke-linecap="round" />
+  <line x1="62" y1="256" x2="152" y2="256" stroke="#34d399" stroke-width="10" stroke-linecap="round" />
+  <line x1="360" y1="256" x2="450" y2="256" stroke="#34d399" stroke-width="10" stroke-linecap="round" />
+  <circle cx="256" cy="256" r="54" fill="#10b981" />
+  <circle cx="256" cy="256" r="24" fill="#ecfdf5" />
+</svg>

@@ -127,6 +127,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     usage: '/mcp',
     category: 'navigation',
   },
+  {
+    name: '/builder',
+    aliases: ['/pitch', '/templates', '/deck'],
+    description: 'Ouvre le Studio SaaS AI App Builder (Pitch Deck technique & Moteur de Templates).',
+    usage: '/builder',
+    category: 'navigation',
+  },
 ];
 
 export function getCommandSuggestions(query: string): SlashCommand[] {

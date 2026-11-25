@@ -4,10 +4,8 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, type GenerateContentParameters } from '@google/genai';
 import Anthropic from '@anthropic-ai/sdk';
-import PDFDocument from 'pdfkit';
-import ExcelJS from 'exceljs';
 
 dotenv.config();
 
@@ -28,6 +26,114 @@ app.use(cors());
 app.use(express.json({ limit: '60mb' }));
 app.use(express.urlencoded({ extended: true, limit: '60mb' }));
 
+const GEMINI_FALLBACK_MODELS = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isTransientGeminiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes('503') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('high demand') ||
+    msg.includes('504') ||
+    msg.includes('DEADLINE_EXCEEDED') ||
+    msg.includes('timeout') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('fetch failed')
+  );
+}
+
+function isNonRetryableModelError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes('429') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('quota') ||
+    msg.includes('404') ||
+    msg.includes('NOT_FOUND') ||
+    msg.includes('400') ||
+    msg.includes('INVALID_ARGUMENT') ||
+    msg.includes('401') ||
+    msg.includes('403') ||
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('PERMISSION_DENIED')
+  );
+}
+
+async function generateGeminiWithFallback(
+  ai: GoogleGenAI,
+  params: {
+    contents: GenerateContentParameters['contents'];
+    config?: GenerateContentParameters['config'];
+    preferLowLatency?: boolean;
+    models?: readonly string[];
+  }
+) {
+  const modelsToTry = params.models?.length ? params.models : GEMINI_FALLBACK_MODELS;
+  let lastError: unknown = null;
+
+  for (let modelIdx = 0; modelIdx < modelsToTry.length; modelIdx++) {
+    const model = modelsToTry[modelIdx];
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const baseConfig = params.config ? { ...params.config } : {};
+        const useLowThinking = params.preferLowLatency || attempt > 1 || modelIdx > 0;
+        if (
+          useLowThinking &&
+          (model.startsWith('gemini-4-') || model.startsWith('gemini-3')) &&
+          !baseConfig.thinkingConfig
+        ) {
+          baseConfig.thinkingConfig = {
+            thinkingLevel: ThinkingLevel.LOW,
+          };
+        }
+
+        const response = await ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: Object.keys(baseConfig).length > 0 ? baseConfig : undefined,
+        });
+
+        if (response.text) {
+          return { response, usedModel: model };
+        }
+        lastError = new Error(`Réponse vide du modèle ${model}`);
+      } catch (err: unknown) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+
+        if (isNonRetryableModelError(err)) {
+          if (
+            msg.includes('400') ||
+            msg.includes('INVALID_ARGUMENT') ||
+            msg.includes('401') ||
+            msg.includes('403') ||
+            msg.includes('API_KEY_INVALID') ||
+            msg.includes('PERMISSION_DENIED')
+          ) {
+            throw err;
+          }
+          break;
+        }
+
+        if (isTransientGeminiError(err) && attempt < maxAttempts) {
+          const backoffMs = 500 * attempt + Math.floor(Math.random() * 250);
+          await sleep(backoffMs);
+          continue;
+        }
+
+        break;
+      }
+    }
+  }
+
+  throw lastError || new Error('Aucun modèle Gemini disponible pour le moment.');
+}
+
 // Initialisation du client GoogleGenAI côté serveur avec User-Agent 'aistudio-build'
 const getAiClient = () => {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -40,7 +146,7 @@ const getAiClient = () => {
       headers: {
         'User-Agent': 'aistudio-build',
       },
-      timeout: 35000,
+      timeout: 90000,
     },
   });
 };
@@ -592,54 +698,29 @@ app.post(['/api/analyze', '/analyze'], async (req: Request, res: Response) => {
       });
     }
 
-    const modelsToTry = [
-      'gemini-3.1-flash-lite',
-      'gemini-4-hydrogen',
-      'gemini-flash-lite-latest',
-    ];
-    let lastError: unknown = null;
-    let replyText = '';
-    let usedModel = modelsToTry[0];
-    let usageMetadata: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number } | undefined;
-
-    for (const model of modelsToTry) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: [
+    const { response, usedModel } = await generateGeminiWithFallback(ai, {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: userPrompt },
             {
-              role: 'user',
-              parts: [
-                { text: userPrompt },
-                {
-                  inlineData: {
-                    mimeType: explicitMime || detectedMime || 'image/jpeg',
-                    data: base64,
-                  },
-                },
-              ],
+              inlineData: {
+                mimeType: explicitMime || detectedMime || 'image/jpeg',
+                data: base64,
+              },
             },
           ],
-          config: {
-            systemInstruction,
-          },
-        });
+        },
+      ],
+      config: {
+        systemInstruction,
+      },
+      preferLowLatency: true,
+    });
 
-        if (response.text) {
-          replyText = response.text;
-          usedModel = model;
-          usageMetadata = response.usageMetadata;
-          break;
-        }
-      } catch (err: unknown) {
-        lastError = err;
-        console.warn(`Analyse capture : modèle ${model} indisponible, bascule...`);
-      }
-    }
-
-    if (!replyText && lastError) {
-      throw lastError;
-    }
+    const replyText = response.text || '';
+    const usageMetadata = response.usageMetadata;
 
     const promptTokens = usageMetadata?.promptTokenCount ?? Math.max(1, Math.round((userPrompt.length + base64.length * 0.05) / 4));
     const candidatesTokens = usageMetadata?.candidatesTokenCount ?? Math.max(1, Math.round(replyText.length / 4));
@@ -674,6 +755,11 @@ app.post(['/api/analyze', '/analyze'], async (req: Request, res: Response) => {
     if (errorMessage.includes('DEADLINE_EXCEEDED') || errorMessage.includes('504') || errorMessage.includes('timeout')) {
       return res.status(504).json({
         error: "Le délai d'analyse de la capture a expiré. Veuillez réessayer.",
+      });
+    }
+    if (errorMessage.includes('503') || errorMessage.includes('UNAVAILABLE') || errorMessage.includes('high demand')) {
+      return res.status(503).json({
+        error: "Le service d'IA subit une forte demande temporaire. Veuillez réessayer dans quelques instants.",
       });
     }
     if (errorMessage.includes('RESOURCE_EXHAUSTED') || errorMessage.includes('429') || errorMessage.includes('quota')) {
@@ -1102,64 +1188,15 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       parts: currentParts,
     });
 
-    // Modèles actifs recommandés (gemini-4-hydrogen en priorité selon le SDK @google/genai)
-    const modelsToTry = [
-      'gemini-4-hydrogen',
-      'gemini-3.1-flash-lite',
-      'gemini-flash-lite-latest',
-    ];
-    let lastError: unknown = null;
-    let replyText = '';
-    let usedModel = modelsToTry[0];
-    let usageMetadata: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number } | undefined;
-
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-    for (const model of modelsToTry) {
-      // Pour chaque modèle, autoriser jusqu'à 2 tentatives pour absorber un micro-pic 503 passager
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const response = await ai.models.generateContent({
-            model,
-            contents,
-            config: {
-              systemInstruction,
-            },
-          });
-
-          if (response.text) {
-            replyText = response.text;
-            usedModel = model;
-            usageMetadata = response.usageMetadata;
-            break;
-          }
-        } catch (err: unknown) {
-          lastError = err;
-          const errStr = String(err);
-          const isDemandSpike =
-            errStr.includes('503') ||
-            errStr.includes('UNAVAILABLE') ||
-            errStr.includes('high demand');
-
-          if (isDemandSpike && attempt < 2) {
-            console.warn(`Pic passager sur ${model} (tentative ${attempt}/2), brève pause de 700ms...`);
-            await sleep(700);
-            continue;
-          }
-
-          console.warn(`Modèle ${model} indisponible (${errStr.slice(0, 100)}...), bascule sur le modèle suivant...`);
-          break; // Passer au modèle suivant dans la liste
-        }
-      }
-
-      if (replyText) {
-        break;
-      }
-    }
-
-    if (!replyText && lastError) {
-      throw lastError;
-    }
+    // Modèles actifs recommandés (gemini-4-hydrogen en priorité avec repli automatique)
+    const { response, usedModel } = await generateGeminiWithFallback(ai, {
+      contents,
+      config: {
+        systemInstruction,
+      },
+    });
+    const replyText = response.text || '';
+    const usageMetadata = response.usageMetadata;
 
     // Calcul précis ou approximatif des tokens
     const promptTokens = usageMetadata?.promptTokenCount ?? Math.max(1, Math.round(JSON.stringify(contents).length / 4));
@@ -1333,16 +1370,16 @@ async function handleRagQuery(req: Request<{}, {}, RagQueryRequest>, res: Respon
 
     if (ai && userQuery) {
       try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+        const { response } = await generateGeminiWithFallback(ai, {
           contents: [{ role: 'user', parts: [{ text: userQuery }] }],
           config: {
             systemInstruction: 'Réponds de manière concise, directe et professionnelle en français.',
           },
+          preferLowLatency: true,
         });
         reply = response.text || '';
       } catch (e) {
-        console.warn('Gemini direct query fallback:', e);
+        console.info('Gemini direct query fallback:', e instanceof Error ? e.message : String(e));
       }
     }
 
@@ -1419,6 +1456,7 @@ function buildSummaryRows(messages: ExportMessageItem[]) {
 // --- 1. GÉNÉRATION DE RAPPORT PDF ---
 async function handleExportPdf(req: Request, res: Response) {
   try {
+    const { default: PDFDocument } = await import('pdfkit');
     const body = (req.body || {}) as ExportPayload;
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const reportTitle = body.title || "Rapport d'analyse • VisionIA";
@@ -1541,6 +1579,7 @@ async function handleExportPdf(req: Request, res: Response) {
 // --- 2. GÉNÉRATION DE RAPPORT EXCEL ---
 async function handleExportExcel(req: Request, res: Response) {
   try {
+    const { default: ExcelJS } = await import('exceljs');
     const body = (req.body || {}) as ExportPayload;
     const messages = Array.isArray(body.messages) ? body.messages : [];
 
@@ -1696,21 +1735,36 @@ app.post('/api/extract-structured', async (req: Request, res: Response) => {
       });
     }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-flash-lite',
+    const { response } = await generateGeminiWithFallback(ai, {
       contents: extractionPrompt,
       config: {
         responseMimeType: 'application/json',
       },
+      preferLowLatency: true,
     });
 
     const rawJson = (response.text || '{}').trim();
     const parsed = JSON.parse(rawJson);
     return res.json({ structured: parsed, raw: rawJson });
   } catch (error: unknown) {
-    return res.status(500).json({
+    const msg = error instanceof Error ? error.message : String(error);
+    const status =
+      msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('high demand')
+        ? 503
+        : msg.includes('504') || msg.includes('DEADLINE_EXCEEDED') || msg.includes('timeout')
+        ? 504
+        : msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')
+        ? 429
+        : 500;
+    return res.status(status).json({
       error:
-        error instanceof Error
+        status === 503
+          ? "Le service d'IA subit une forte demande temporaire. Veuillez réessayer dans un instant."
+          : status === 504
+          ? "Le délai d'extraction a expiré. Veuillez réessayer."
+          : status === 429
+          ? "Quota IA temporairement atteint. Patientez quelques instants."
+          : error instanceof Error
           ? error.message
           : "Impossible d'extraire la structure JSON.",
     });
@@ -1888,38 +1942,24 @@ app.post('/api/orchestrate-step', async (req: Request, res: Response) => {
           error: "La clé API Gemini n'est pas configurée dans l'environnement du serveur.",
         });
       }
-      const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'];
-      let lastErr: unknown = null;
-      for (const model of modelsToTry) {
-        try {
-          const response = await ai.models.generateContent({
-            model,
-            contents: userPrompt,
-            config: {
-              systemInstruction,
-            },
-          });
-          if (response.text) {
-            outputText = response.text.trim();
-            const promptTokens = response.usageMetadata?.promptTokenCount ?? 0;
-            const candidatesTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
-            const totalTokens = response.usageMetadata?.totalTokenCount ?? promptTokens + candidatesTokens;
-            usage = {
-              promptTokens,
-              candidatesTokens,
-              totalTokens,
-              estimatedCostUsd: (promptTokens * 0.075 + candidatesTokens * 0.3) / 1000000,
-              modelName: model,
-            };
-            break;
-          }
-        } catch (err) {
-          lastErr = err;
-        }
-      }
-      if (!outputText) {
-        throw lastErr || new Error("Aucune réponse reçue du modèle pour cette étape.");
-      }
+      const { response, usedModel } = await generateGeminiWithFallback(ai, {
+        contents: userPrompt,
+        config: {
+          systemInstruction,
+        },
+        preferLowLatency: true,
+      });
+      outputText = (response.text || '').trim();
+      const promptTokens = response.usageMetadata?.promptTokenCount ?? 0;
+      const candidatesTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+      const totalTokens = response.usageMetadata?.totalTokenCount ?? promptTokens + candidatesTokens;
+      usage = {
+        promptTokens,
+        candidatesTokens,
+        totalTokens,
+        estimatedCostUsd: (promptTokens * 0.075 + candidatesTokens * 0.3) / 1000000,
+        modelName: usedModel,
+      };
     }
 
     const closingLine = `ÉTAPE ${step} TERMINÉE - RAM LIBÉRÉE`;
@@ -1970,47 +2010,41 @@ interface McpBlueprintData {
 const MCP_BLUEPRINT_PATH = path.resolve(__dirname, 'mcp_blueprint.json');
 
 const DEFAULT_MCP_BLUEPRINT: McpBlueprintData = {
-  titre: 'Cartographie du développement web et architecture MCP',
+  titre: "Stratégie de développement d'une plateforme SaaS AI App Builder",
   resume:
-    "Ce contenu analyse la structure du développement web (Back-End/Front-End) et démontre son importance cruciale pour le fonctionnement et l'extensibilité d'une architecture d'assistant intelligent utilisant le protocole MCP.",
+    "Ce document propose une architecture et une stratégie commerciale pour transformer une application d'outils IA en un 'AI Studio-as-a-Service' permettant aux utilisateurs de construire des applications modulaires.",
   entites: [
-    'Back-End',
-    'Front-End',
-    'MERN Stack',
-    'MongoDB',
-    'Express',
-    'React',
-    'Node.js',
-    'Python',
-    'JavaScript',
+    'Google AI Studio',
+    'MarineVision',
+    'Gemini',
+    'Claude',
+    'DeepSeek',
+    'Jinja2',
+    'Handlebars',
     'PostgreSQL',
-    'Tailwind',
-    'Model Context Protocol (MCP)',
-    'REST',
-    'GraphQL',
-    'MySQL',
+    'React',
+    'Next.js',
+    'Android',
+    'MCP',
   ],
   points_cles: [
-    'La stack technique sert de feuille de route pour la montée en compétence et la scalabilité des projets.',
-    "L'architecture agentique repose sur le Back-End pour l'exécution et le traitement des données, et sur le Front-End pour l'interface utilisateur.",
-    "Le protocole MCP est indispensable pour l'intégration de serveurs, d'APIs et de plugins externes.",
-    "L'extensibilité du système est permise par une structure modulaire en JavaScript ou Python.",
+    'Abstraction des modèles via une couche de routage API',
+    'Génération de code via moteur de templates',
+    'Stockage des configurations utilisateur dans une base PostgreSQL',
+    "Modèle économique basé sur l'abonnement Pro et le déploiement",
+    "Intégration d'agents MCP pour l'automatisation du développement",
   ],
   actions_mcp_recommandees: [
     {
-      tache: "Configurer un serveur MCP pour l'accès aux bases de données locales",
+      tache: 'Générer un Pitch Deck technique pour la plateforme',
       priorite: 'haute',
     },
     {
-      tache: "Implémenter une passerelle API REST/GraphQL pour l'exportation de données",
+      tache: "Implémenter le panneau 'Advanced Settings' pour le choix du modèle et du framework",
       priorite: 'haute',
     },
     {
-      tache: "Développer un plugin d'interface personnalisé via React/Tailwind pour la visualisation de fichiers",
-      priorite: 'moyenne',
-    },
-    {
-      tache: "Automatiser le traitement d'images via des bibliothèques de vision intégrées",
+      tache: 'Développer le moteur de templates pour la génération de code source',
       priorite: 'moyenne',
     },
   ],
@@ -2492,15 +2526,319 @@ app.post('/api/graphql', (req: Request, res: Response) => {
   }
 });
 
-// En mode développement, monter le middleware Vite
+// ==========================================
+// MOTEUR DE TEMPLATES (HANDLEBARS / JINJA2) & PITCH DECK TECHNIQUE
+// ==========================================
+function resolveTemplatePath(ctx: Record<string, unknown>, pathExpr: string): unknown {
+  const parts = pathExpr.trim().split('.');
+  let cur: unknown = ctx;
+  for (const part of parts) {
+    if (cur && typeof cur === 'object' && part in (cur as Record<string, unknown>)) {
+      cur = (cur as Record<string, unknown>)[part];
+    } else {
+      return undefined;
+    }
+  }
+  return cur;
+}
+
+function renderServerTemplate(template: string, context: Record<string, unknown>): string {
+  let out = template.replace(/\{#[\s\S]*?#\}/g, '').replace(/\{\{!--[\s\S]*?--\}\}/g, '');
+
+  out = out.replace(
+    /\{%\s*for\s+(\w+)\s+in\s+([\w.]+)\s*%\}([\s\S]*?)\{%\s*endfor\s*%\}/g,
+    (_, itemVar: string, listPath: string, body: string) => {
+      const list = resolveTemplatePath(context, listPath);
+      if (!Array.isArray(list)) return '';
+      return list
+        .map((entry, idx) =>
+          renderServerTemplate(body, {
+            ...context,
+            [itemVar]: entry,
+            loop_index: idx + 1,
+          })
+        )
+        .join('');
+    }
+  );
+
+  out = out.replace(
+    /\{\{#each\s+([\w.]+)\s*\}\}([\s\S]*?)\{\{\/each\}\}/g,
+    (_, listPath: string, body: string) => {
+      const list = resolveTemplatePath(context, listPath);
+      if (!Array.isArray(list)) return '';
+      return list
+        .map((entry, idx) => {
+          const itemContext: Record<string, unknown> =
+            entry && typeof entry === 'object'
+              ? { ...context, ...(entry as Record<string, unknown>), this: entry, '@index': idx }
+              : { ...context, this: entry, '@index': idx };
+          return renderServerTemplate(body, itemContext);
+        })
+        .join('');
+    }
+  );
+
+  out = out.replace(
+    /\{%\s*if\s+([\w.]+)\s*%\}([\s\S]*?)(?:\{%\s*else\s*%\}([\s\S]*?))?\{%\s*endif\s*%\}/g,
+    (_, condPath: string, truthyBody: string, falsyBody = '') => {
+      const val = resolveTemplatePath(context, condPath);
+      const ok = Array.isArray(val) ? val.length > 0 : Boolean(val);
+      return renderServerTemplate(ok ? truthyBody : falsyBody, context);
+    }
+  );
+
+  out = out.replace(
+    /\{\{#if\s+([\w.]+)\s*\}\}([\s\S]*?)(?:\{\{else\}\}([\s\S]*?))?\{\{\/if\}\}/g,
+    (_, condPath: string, truthyBody: string, falsyBody = '') => {
+      const val = resolveTemplatePath(context, condPath);
+      const ok = Array.isArray(val) ? val.length > 0 : Boolean(val);
+      return renderServerTemplate(ok ? truthyBody : falsyBody, context);
+    }
+  );
+
+  out = out.replace(/\{\{\s*([\w.@]+)\s*\}\}/g, (_, expr: string) => {
+    if (expr === 'this') {
+      return context.this !== undefined ? String(context.this) : '';
+    }
+    const val = resolveTemplatePath(context, expr);
+    if (val === undefined || val === null) return '';
+    if (typeof val === 'object') return JSON.stringify(val);
+    return String(val);
+  });
+
+  return out;
+}
+
+app.post('/api/templates/render', (req: Request, res: Response) => {
+  try {
+    const {
+      template,
+      variables = {},
+      engine = 'handlebars',
+    } = (req.body || {}) as {
+      template?: string;
+      variables?: Record<string, unknown>;
+      engine?: 'handlebars' | 'jinja2';
+    };
+
+    if (!template || typeof template !== 'string') {
+      return res.status(400).json({ error: 'Le code source du template est requis.' });
+    }
+
+    const rendered = renderServerTemplate(template, variables || {});
+    return res.json({
+      engine,
+      rendered,
+      lineCount: rendered.split('\n').length,
+      renderedAt: new Date().toISOString(),
+    });
+  } catch (error: unknown) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : 'Erreur lors de la compilation du template.',
+    });
+  }
+});
+
+app.post('/api/pitch-deck/generate', async (req: Request, res: Response) => {
+  try {
+    const {
+      platformName = 'AI Studio-as-a-Service',
+      provider = 'gemini',
+      modelName = 'gemini-4-hydrogen',
+      framework = 'react-tailwind',
+      templateEngine = 'handlebars',
+      databaseBackend = 'postgresql',
+      planTier = 'pro-saas',
+      enrichWithAi = false,
+    } = (req.body || {}) as {
+      platformName?: string;
+      provider?: 'gemini' | 'claude' | 'deepseek';
+      modelName?: string;
+      framework?: string;
+      templateEngine?: string;
+      databaseBackend?: string;
+      planTier?: string;
+      enrichWithAi?: boolean;
+    };
+
+    const bp = loadMcpBlueprint();
+    const slides = [
+      {
+        number: '01',
+        title: `Vision & Positionnement — ${platformName}`,
+        subtitle: bp.titre,
+        bullets: [
+          bp.resume,
+          `Cible produit : transformer une suite d'outils IA en plateforme modulaire SaaS (${planTier}).`,
+          `Écosystème couvert : ${bp.entites.slice(0, 8).join(', ')}.`,
+        ],
+      },
+      {
+        number: '02',
+        title: 'Couche de Routage Multi-Modèles & Abstraction API',
+        subtitle: `Moteur actif : ${provider.toUpperCase()} (${modelName})`,
+        bullets: [
+          'Unification des appels Gemini, Claude 3.5 Sonnet, DeepSeek et Ollama local derrière /api/chat & /api/orchestrate-step.',
+          'Bascule de secours automatique en cas de latence ou de quota, avec suivi précis des tokens et du coût estimé.',
+          'Panneau Advanced Settings pour piloter modèle, température, fenêtre de tokens et framework cible en temps réel.',
+        ],
+      },
+      {
+        number: '03',
+        title: 'Moteur de Templates & Génération de Code Source',
+        subtitle: `Compilateur ${templateEngine} → ${framework}`,
+        bullets: [
+          'Génération déterministe et auditable de modules React + Tailwind, Next.js App Router, Express MCP et Android WebView.',
+          'Séparation nette entre squelettes Handlebars/Jinja2 et paramètres injectés par les agents IA.',
+          'Compatible avec le pipeline séquentiel Low-RAM (≤ 150 lignes par bloc validé).',
+        ],
+      },
+      {
+        number: '04',
+        title: 'Agents MCP, Passerelle REST/GraphQL & Persistance',
+        subtitle: `Stockage cible : ${databaseBackend === 'postgresql' ? 'PostgreSQL' : 'Mémoire locale'}`,
+        bullets: [
+          'Serveur MCP JSON-RPC 2.0 exposant outils de configuration, interrogation mémoire et export structuré.',
+          'Passerelle /api/graphql et endpoints REST JSON/CSV pour connecter clients web et mobiles Android.',
+          'Persistance des blueprints architecturaux, préférences utilisateur et historiques d’analyses.',
+        ],
+      },
+      {
+        number: '05',
+        title: 'Feuille de Route Technique & Actions Prioritaires',
+        subtitle: `${bp.actions_mcp_recommandees.length} chantiers MCP identifiés`,
+        bullets: bp.actions_mcp_recommandees.map(
+          (a) => `[Priorité ${a.priorite}] ${a.tache}`
+        ),
+      },
+      {
+        number: '06',
+        title: 'Modèle Économique SaaS Pro & Déploiement',
+        subtitle: 'Monétisation par paliers & déploiement continu',
+        bullets: [
+          'Offre Starter : prototypage local (Ollama / OCR client-side) et templates standards.',
+          'Offre Pro SaaS : routage multi-modèles (Gemini, Claude, DeepSeek), agents MCP autonomes et exports PDF/Excel/Android.',
+          'Déploiement clé en main : build Vite unifié + serveur Express/Node et export APK/WebView.',
+        ],
+      },
+    ];
+
+    let markdown = [
+      `# Pitch Deck Technique — ${platformName}`,
+      '',
+      `> ${bp.resume}`,
+      '',
+      ...slides.flatMap((s) => [
+        `## ${s.number}. ${s.title}`,
+        `*${s.subtitle}*`,
+        '',
+        ...s.bullets.map((b) => `- ${b}`),
+        '',
+      ]),
+    ].join('\n');
+
+    if (enrichWithAi) {
+      const prompt = [
+        `Enrichis et peaufine ce Pitch Deck technique en français (reste concis, structuré en 6 slides numérotées 01 à 06, adapté à des investisseurs/CTO).`,
+        `Configuration active : Modèle=${modelName}, Framework=${framework}, Templates=${templateEngine}, Base=${databaseBackend}.`,
+        '',
+        markdown,
+      ].join('\n');
+
+      if (provider === 'deepseek') {
+        const ds = await callDeepSeekCompletion({
+          messages: [
+            { role: 'system', content: 'Tu es un architecte logiciel CTO rédigeant un pitch deck technique en français.' },
+            { role: 'user', content: prompt },
+          ],
+        });
+        if (ds.content.trim()) markdown = ds.content.trim();
+      } else if (provider === 'claude') {
+        const anthropic = getAnthropicClient();
+        if (!anthropic) {
+          return res.status(401).json({
+            error: "La clé API Anthropic (ANTHROPIC_API_KEY) est invalide ou non configurée.",
+          });
+        }
+        const claudeRes = await anthropic.messages.create({
+          model: 'claude-3-5-sonnet-20241022',
+          max_tokens: 1800,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        const txt = claudeRes.content
+          .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+          .map((b) => b.text)
+          .join('\n')
+          .trim();
+        if (txt) markdown = txt;
+      } else {
+        const ai = getAiClient();
+        if (ai) {
+          const { response } = await generateGeminiWithFallback(ai, {
+            contents: prompt,
+            preferLowLatency: true,
+          });
+          if (response.text?.trim()) {
+            markdown = response.text.trim();
+          }
+        }
+      }
+    }
+
+    return res.json({
+      platformName,
+      slides,
+      markdown,
+      generatedAt: new Date().toISOString(),
+      configSummary: {
+        provider,
+        modelName,
+        framework,
+        templateEngine,
+        databaseBackend,
+        planTier,
+      },
+    });
+  } catch (error: unknown) {
+    const statusCode =
+      typeof error === 'object' && error !== null && 'statusCode' in error
+        ? Number((error as { statusCode?: number }).statusCode) || 500
+        : 500;
+    return res.status(statusCode).json({
+      error: error instanceof Error ? error.message : 'Erreur lors de la génération du Pitch Deck.',
+    });
+  }
+});
+
+// En mode développement, lier le port 3000 immédiatement et initialiser Vite en parallèle
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer } = await import('vite');
-    const vite = await createServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    let viteInstance: Awaited<ReturnType<typeof import('vite')['createServer']>> | null = null;
+    const viteReadyPromise = import('vite')
+      .then(({ createServer }) =>
+        createServer({
+          server: { middlewareMode: true },
+          appType: 'spa',
+        })
+      )
+      .then((v) => {
+        viteInstance = v;
+        return v;
+      })
+      .catch((err) => {
+        console.error('Erreur initialisation Vite:', err);
+        throw err;
+      });
+
+    app.use(async (req: Request, res: Response, next) => {
+      try {
+        const vite = viteInstance || (await viteReadyPromise);
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
     });
-    app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
     app.get('*', (req: Request, res: Response) => {

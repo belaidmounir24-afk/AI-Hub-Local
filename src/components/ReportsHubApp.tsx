@@ -21,14 +21,16 @@ import {
 
 import { McpGatewayPanel } from './McpGatewayPanel';
 import { FileVisualizerPlugin } from './FileVisualizerPlugin';
+import { AppBuilderStudio } from './AppBuilderStudio';
 
-export type ReportsTabId = 'mcp' | 'visualizer' | 'exports';
+export type ReportsTabId = 'mcp' | 'builder' | 'visualizer' | 'exports';
 
 interface ReportsHubAppProps {
   multimodalMessages: ChatMessage[];
   ollamaMessages: OllamaMessage[];
   ollamaConfig: OllamaConfig;
   initialTab?: ReportsTabId;
+  onOpenSettings?: () => void;
 }
 
 export const ReportsHubApp: React.FC<ReportsHubAppProps> = ({
@@ -36,6 +38,7 @@ export const ReportsHubApp: React.FC<ReportsHubAppProps> = ({
   ollamaMessages,
   ollamaConfig,
   initialTab = 'mcp',
+  onOpenSettings,
 }) => {
   const [activeTab, setActiveTab] = useState<ReportsTabId>(initialTab);
   const [source, setSource] = useState<'multimodal' | 'ollama'>('multimodal');
@@ -157,6 +160,7 @@ export const ReportsHubApp: React.FC<ReportsHubAppProps> = ({
           {(
             [
               { id: 'mcp', label: 'Passerelle MCP & GraphQL' },
+              { id: 'builder', label: 'App Builder & Pitch Deck' },
               { id: 'visualizer', label: 'Visualiseur & Vision' },
               { id: 'exports', label: 'Exports & Android' },
             ] as Array<{ id: ReportsTabId; label: string }>
@@ -183,6 +187,8 @@ export const ReportsHubApp: React.FC<ReportsHubAppProps> = ({
       </div>
 
       {activeTab === 'mcp' && <McpGatewayPanel />}
+
+      {activeTab === 'builder' && <AppBuilderStudio onOpenSettings={onOpenSettings} />}
 
       {activeTab === 'visualizer' && <FileVisualizerPlugin />}
 

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Layers,
   ScanText,
@@ -120,34 +120,183 @@ function buildClientStepSystemPrompt(step: StepNumber): string {
   return base.join('\n');
 }
 
+const STORAGE_KEY_ORCHESTRATOR_STATE = 'aihub_lowram_orchestrator_v1';
+
+interface SavedOrchestratorState {
+  engine: OrchestratorEngine;
+  currentStep: StepNumber;
+  goalInput: string;
+  selectedSubtask: string;
+  suggestedSubtasks: string[];
+  stateSummary: string;
+  activeCodeBlock: string;
+  validatedSegments: string[];
+  stepOutput: string;
+  lastLineCount: number;
+  ramReleasedCount: number;
+}
+
+function loadSavedOrchestratorState(defaultProvider: AiProvider): SavedOrchestratorState {
+  const fallback: SavedOrchestratorState = {
+    engine: defaultProvider,
+    currentStep: 1,
+    goalInput: '',
+    selectedSubtask: '',
+    suggestedSubtasks: [],
+    stateSummary: '',
+    activeCodeBlock: '',
+    validatedSegments: [],
+    stepOutput: '',
+    lastLineCount: 0,
+    ramReleasedCount: 0,
+  };
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_ORCHESTRATOR_STATE);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<SavedOrchestratorState>;
+    const validStep: StepNumber =
+      parsed.currentStep === 2 || parsed.currentStep === 3 || parsed.currentStep === 4
+        ? parsed.currentStep
+        : 1;
+    const validEngine: OrchestratorEngine =
+      parsed.engine === 'claude' ||
+      parsed.engine === 'deepseek' ||
+      parsed.engine === 'ollama' ||
+      parsed.engine === 'gemini'
+        ? parsed.engine
+        : defaultProvider;
+    return {
+      engine: validEngine,
+      currentStep: validStep,
+      goalInput: typeof parsed.goalInput === 'string' ? parsed.goalInput : '',
+      selectedSubtask: typeof parsed.selectedSubtask === 'string' ? parsed.selectedSubtask : '',
+      suggestedSubtasks: Array.isArray(parsed.suggestedSubtasks)
+        ? parsed.suggestedSubtasks.filter((s): s is string => typeof s === 'string')
+        : [],
+      stateSummary: typeof parsed.stateSummary === 'string' ? parsed.stateSummary : '',
+      activeCodeBlock: typeof parsed.activeCodeBlock === 'string' ? parsed.activeCodeBlock : '',
+      validatedSegments: Array.isArray(parsed.validatedSegments)
+        ? parsed.validatedSegments.filter((s): s is string => typeof s === 'string')
+        : [],
+      stepOutput: typeof parsed.stepOutput === 'string' ? parsed.stepOutput : '',
+      lastLineCount:
+        typeof parsed.lastLineCount === 'number' && parsed.lastLineCount >= 0
+          ? parsed.lastLineCount
+          : 0,
+      ramReleasedCount:
+        typeof parsed.ramReleasedCount === 'number' && parsed.ramReleasedCount >= 0
+          ? parsed.ramReleasedCount
+          : 0,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function persistOrchestratorState(payload: SavedOrchestratorState) {
+  try {
+    localStorage.setItem(STORAGE_KEY_ORCHESTRATOR_STATE, JSON.stringify(payload));
+  } catch {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY_ORCHESTRATOR_STATE,
+        JSON.stringify({
+          ...payload,
+          stepOutput: '',
+          activeCodeBlock: '',
+          validatedSegments: payload.validatedSegments.slice(-4),
+        })
+      );
+    } catch {
+      // Quota localStorage plein
+    }
+  }
+}
+
 export const OrchestratorApp: React.FC<OrchestratorAppProps> = ({
   aiProvider,
   ollamaConfig,
   ollamaStatus,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const initialSavedRef = useRef<SavedOrchestratorState | null>(null);
+  if (!initialSavedRef.current) {
+    initialSavedRef.current = loadSavedOrchestratorState(aiProvider);
+  }
+  const initialSaved = initialSavedRef.current;
 
-  const [engine, setEngine] = useState<OrchestratorEngine>(aiProvider);
-  const [currentStep, setCurrentStep] = useState<StepNumber>(1);
-  const [goalInput, setGoalInput] = useState<string>('');
-  const [selectedSubtask, setSelectedSubtask] = useState<string>('');
-  const [suggestedSubtasks, setSuggestedSubtasks] = useState<string[]>([]);
-  const [stateSummary, setStateSummary] = useState<string>('');
-  const [activeCodeBlock, setActiveCodeBlock] = useState<string>('');
-  const [validatedSegments, setValidatedSegments] = useState<string[]>([]);
+  const [engine, setEngine] = useState<OrchestratorEngine>(initialSaved.engine);
+  const [currentStep, setCurrentStep] = useState<StepNumber>(initialSaved.currentStep);
+  const [goalInput, setGoalInput] = useState<string>(initialSaved.goalInput);
+  const [selectedSubtask, setSelectedSubtask] = useState<string>(initialSaved.selectedSubtask);
+  const [suggestedSubtasks, setSuggestedSubtasks] = useState<string[]>(initialSaved.suggestedSubtasks);
+  const [stateSummary, setStateSummary] = useState<string>(initialSaved.stateSummary);
+  const [activeCodeBlock, setActiveCodeBlock] = useState<string>(initialSaved.activeCodeBlock);
+  const [validatedSegments, setValidatedSegments] = useState<string[]>(initialSaved.validatedSegments);
 
-  const [stepOutput, setStepOutput] = useState<string>('');
-  const [lastLineCount, setLastLineCount] = useState<number>(0);
+  const [stepOutput, setStepOutput] = useState<string>(initialSaved.stepOutput);
+  const [lastLineCount, setLastLineCount] = useState<number>(initialSaved.lastLineCount);
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null);
-  const [ramReleasedCount, setRamReleasedCount] = useState<number>(0);
+  const [ramReleasedCount, setRamReleasedCount] = useState<number>(initialSaved.ramReleasedCount);
 
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [isOcrRunning, setIsOcrRunning] = useState<boolean>(false);
   const [ocrProgress, setOcrProgress] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(() =>
+    initialSaved.goalInput ||
+    initialSaved.validatedSegments.length > 0 ||
+    initialSaved.currentStep > 1 ||
+    initialSaved.stepOutput ||
+    initialSaved.stateSummary
+      ? `Session Low-RAM restaurée (Étape ${initialSaved.currentStep} · ${initialSaved.validatedSegments.length} segment(s) validé(s)).`
+      : null
+  );
   const [copied, setCopied] = useState<boolean>(false);
   const [memorized, setMemorized] = useState<boolean>(false);
+
+  const latestPayloadRef = useRef<SavedOrchestratorState>(initialSaved);
+
+  // Sauvegarde automatique dans le localStorage pour reprendre après un rafraîchissement
+  useEffect(() => {
+    const payload: SavedOrchestratorState = {
+      engine,
+      currentStep,
+      goalInput,
+      selectedSubtask,
+      suggestedSubtasks,
+      stateSummary,
+      activeCodeBlock,
+      validatedSegments,
+      stepOutput,
+      lastLineCount,
+      ramReleasedCount,
+    };
+    latestPayloadRef.current = payload;
+    persistOrchestratorState(payload);
+  }, [
+    engine,
+    currentStep,
+    goalInput,
+    selectedSubtask,
+    suggestedSubtasks,
+    stateSummary,
+    activeCodeBlock,
+    validatedSegments,
+    stepOutput,
+    lastLineCount,
+    ramReleasedCount,
+  ]);
+
+  useEffect(() => {
+    const handleFlush = () => {
+      persistOrchestratorState(latestPayloadRef.current);
+    };
+    window.addEventListener('pagehide', handleFlush);
+    return () => {
+      window.removeEventListener('pagehide', handleFlush);
+    };
+  }, []);
 
   const handleOcrImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -319,16 +468,23 @@ export const OrchestratorApp: React.FC<OrchestratorAppProps> = ({
 
   const handleResetPipeline = () => {
     setCurrentStep(1);
+    setGoalInput('');
     setStateSummary('');
     setActiveCodeBlock('');
     setStepOutput('');
     setSuggestedSubtasks([]);
     setSelectedSubtask('');
     setValidatedSegments([]);
+    setRamReleasedCount(0);
     setLastLineCount(0);
     setLastLatencyMs(null);
     setErrorMsg(null);
-    setStatusMsg('Pipeline réinitialisé et mémoire contexte libérée.');
+    try {
+      localStorage.removeItem(STORAGE_KEY_ORCHESTRATOR_STATE);
+    } catch {
+      // Ignorer
+    }
+    setStatusMsg('Pipeline réinitialisé et sauvegarde locale effacée.');
   };
 
   const activeMeta = PIPELINE_STEPS[currentStep - 1];

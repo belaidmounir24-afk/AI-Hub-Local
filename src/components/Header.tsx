@@ -11,8 +11,10 @@ import {
   Cpu,
   CheckCircle2,
   AlertCircle,
+  RefreshCw,
 } from 'lucide-react';
 import { HubAppId } from '../types';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface HeaderProps {
   activeApp: HubAppId;
@@ -28,6 +30,8 @@ interface HeaderProps {
   onStopSpeech: () => void;
   showClearAction: boolean;
   ollamaReachable: boolean | null;
+  isCheckingOllama?: boolean;
+  onRefreshOllama?: () => void;
 }
 
 const NAV_ITEMS: Array<{ id: HubAppId; label: string }> = [
@@ -54,6 +58,8 @@ export const Header: React.FC<HeaderProps> = ({
   onStopSpeech,
   showClearAction,
   ollamaReachable,
+  isCheckingOllama = false,
+  onRefreshOllama,
 }) => {
   return (
     <header className="sticky top-0 z-30 w-full border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md transition-colors">
@@ -104,26 +110,52 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Zone 3 : Radar Ollama + Actions utilitaires */}
         <div className="flex items-center gap-1 shrink-0">
-          <button
-            type="button"
-            onClick={() => onSelectApp('ollama')}
-            className="hidden sm:flex min-h-[44px] px-2.5 rounded-lg items-center gap-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-            title="Statut du radar Ollama local (vérification automatique toutes les 5s)"
-          >
-            {ollamaReachable === true ? (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                <span className="text-emerald-700 dark:text-emerald-400">Ollama Prêt</span>
-              </>
-            ) : ollamaReachable === false ? (
-              <>
-                <AlertCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0" />
-                <span className="text-slate-600 dark:text-slate-400">Ollama Hors Ligne</span>
-              </>
-            ) : (
-              <span className="text-slate-500 dark:text-slate-400">Vérif. Ollama...</span>
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => onSelectApp('ollama')}
+              className="hidden sm:flex min-h-[44px] px-2.5 rounded-lg items-center gap-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              title="Statut du radar Ollama local (vérification automatique toutes les 5s)"
+            >
+              {ollamaReachable === true ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span className="text-emerald-700 dark:text-emerald-400">Ollama Prêt</span>
+                </>
+              ) : ollamaReachable === false ? (
+                <>
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0" />
+                  <span className="text-slate-600 dark:text-slate-400">Ollama Hors Ligne</span>
+                </>
+              ) : (
+                <span className="text-slate-500 dark:text-slate-400">Vérif. Ollama...</span>
+              )}
+            </button>
+
+            {onRefreshOllama && (
+              <button
+                type="button"
+                onClick={onRefreshOllama}
+                disabled={isCheckingOllama}
+                aria-busy={isCheckingOllama}
+                className="w-11 h-11 rounded-lg flex items-center justify-center text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-60 disabled:cursor-wait transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                title={
+                  isCheckingOllama
+                    ? 'Vérification du serveur Ollama en cours...'
+                    : "Rafraîchir manuellement l'état du serveur Ollama"
+                }
+                aria-label="Rafraîchir l'état du serveur Ollama"
+              >
+                <RefreshCw
+                  className={`w-4 h-4 ${
+                    isCheckingOllama ? 'animate-spin text-emerald-600 dark:text-emerald-400' : ''
+                  }`}
+                />
+              </button>
             )}
-          </button>
+          </div>
+
+          <PWAInstallButton />
 
           {isSpeaking ? (
             <button

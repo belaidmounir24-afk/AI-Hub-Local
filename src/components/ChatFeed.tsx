@@ -462,7 +462,7 @@ export const ChatFeed: React.FC<ChatFeedProps> = ({
                   promptTokens: Math.max(1, Math.round(message.text.length / 8)),
                   candidatesTokens: Math.max(1, Math.round(message.text.length / 4)),
                   estimatedCostUsd: Number(((Math.max(1, Math.round(message.text.length / 4)) * 0.3) / 1000000).toFixed(6)),
-                  modelName: 'gemini-3.1-flash-lite',
+                  modelName: 'gemini-4-hydrogen',
                 };
 
                 return (

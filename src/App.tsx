@@ -13,6 +13,7 @@ import { MediaLightbox } from './components/MediaLightbox';
 import { CommandHelpModal } from './components/CommandHelpModal';
 import { SettingsModal } from './components/SettingsModal';
 import { MemoryModal } from './components/MemoryModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import {
   AiProvider,
   AttachedFile,
@@ -743,6 +744,14 @@ export default function App() {
         handleSelectApp('exports');
         break;
 
+      case '/builder':
+      case '/pitch':
+      case '/templates':
+      case '/deck':
+        setReportsTab('builder');
+        handleSelectApp('exports');
+        break;
+
       case '/effacer':
       case '/clear':
       case '/reset':
@@ -1060,6 +1069,8 @@ export default function App() {
         onStopSpeech={stopSpeech}
         showClearAction={showClearAction}
         ollamaReachable={ollamaStatus ? ollamaStatus.reachable : null}
+        isCheckingOllama={isCheckingOllama}
+        onRefreshOllama={() => void probeOllama(ollamaConfig.endpoint)}
       />
 
       <MobileAppStrip activeApp={activeApp} onSelectApp={handleSelectApp} />
@@ -1179,6 +1190,7 @@ export default function App() {
             ollamaMessages={ollamaMessages}
             ollamaConfig={ollamaConfig}
             initialTab={reportsTab}
+            onOpenSettings={() => setIsSettingsOpen(true)}
           />
         )}
       </main>
@@ -1220,6 +1232,8 @@ export default function App() {
           setLastInstruction(promptText);
         }}
       />
+
+      <OfflineIndicator />
     </div>
   );
 }

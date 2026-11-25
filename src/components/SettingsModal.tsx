@@ -14,6 +14,9 @@ import {
   Zap,
   Sliders,
   RotateCcw,
+  Copy,
+  FileCode,
+  Upload,
 } from 'lucide-react';
 import { AiProvider, OllamaConfig } from '../types';
 import {
@@ -25,7 +28,17 @@ import {
 import {
   DEFAULT_OPTIMIZATION_CONFIG,
   VisionOptimizationConfig,
+  normalizeOptimizationConfig,
 } from '../utils/optimizationConfig';
+import {
+  AdvancedBuilderSettings,
+  DEFAULT_ADVANCED_BUILDER_SETTINGS,
+  FRAMEWORK_LABELS,
+  MODEL_OPTIONS_BY_PROVIDER,
+  TargetFrameworkId,
+  loadAdvancedBuilderSettings,
+  saveAdvancedBuilderSettings,
+} from '../utils/builderSettings';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -63,8 +76,90 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasAnthropicKey: boolean;
     hasDeepSeekKey: boolean;
   } | null>(null);
+  const [builderSettings, setBuilderSettings] = useState<AdvancedBuilderSettings>(() =>
+    loadAdvancedBuilderSettings()
+  );
+  const [showJsonEditor, setShowJsonEditor] = useState(false);
+  const [jsonDraft, setJsonDraft] = useState(() =>
+    JSON.stringify(optimizationConfig, null, 2)
+  );
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const [optFeedback, setOptFeedback] = useState<string | null>(null);
+  const jsonFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastNonZeroVolumeRef = useRef<number>(settings.volume > 0 ? settings.volume : 1.0);
   const isSupported = isSpeechSynthesisSupported();
+
+  useEffect(() => {
+    setJsonDraft(JSON.stringify(optimizationConfig, null, 2));
+  }, [optimizationConfig]);
+
+  const handleApplyRawJsonOptimization = async () => {
+    setJsonError(null);
+    setOptFeedback(null);
+    try {
+      const parsed = JSON.parse(jsonDraft);
+      const normalized = normalizeOptimizationConfig(parsed);
+      await onUpdateOptimizationConfig(normalized);
+      setJsonDraft(JSON.stringify(normalized, null, 2));
+      setOptFeedback(
+        `Profil « ${normalized.system_config.profile_name} » activé (cible ${Math.round(normalized.system_config.target_accuracy * 100)} %).`
+      );
+    } catch (err) {
+      setJsonError(
+        err instanceof Error
+          ? `JSON invalide : ${err.message}`
+          : 'Impossible de valider le schéma JSON.'
+      );
+    }
+  };
+
+  const handleCopyOptimizationJson = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(optimizationConfig, null, 2));
+      setOptFeedback('JSON visionia_optimization.json copié dans le presse-papiers.');
+    } catch {
+      setJsonError('Copie automatique bloquée par le navigateur.');
+    }
+  };
+
+  const handleImportOptimizationFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setJsonDraft(reader.result);
+        setShowJsonEditor(true);
+        setJsonError(null);
+        setOptFeedback(
+          'Fichier chargé dans l’éditeur. Cliquez sur « Confirmer et activer le profil ».'
+        );
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const updateBuilderSettings = (next: AdvancedBuilderSettings) => {
+    setBuilderSettings(next);
+    saveAdvancedBuilderSettings(next);
+    if (next.provider !== aiProvider) {
+      onUpdateAiProvider(next.provider);
+    }
+  };
+
+  useEffect(() => {
+    if (builderSettings.provider !== aiProvider) {
+      const updated: AdvancedBuilderSettings = {
+        ...builderSettings,
+        provider: aiProvider,
+        modelName: MODEL_OPTIONS_BY_PROVIDER[aiProvider][0],
+      };
+      setBuilderSettings(updated);
+      saveAdvancedBuilderSettings(updated);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiProvider]);
 
   useEffect(() => {
     if (settings.volume > 0) {
@@ -418,31 +513,312 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           <div className="border-t border-slate-200 dark:border-slate-800" />
 
-          {/* Section Optimisation Agentique (visionia_optimization.json) */}
+          {/* Panneau Advanced Settings (Modèle, Framework, Templates & Persistance) */}
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <h3 className="text-xs font-bold text-slate-900 dark:text-white">
+                  Advanced Settings (Modèle &amp; Framework)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => updateBuilderSettings(DEFAULT_ADVANCED_BUILDER_SETTINGS)}
+                className="text-[11px] font-semibold text-slate-500 hover:text-emerald-700 dark:text-slate-400 dark:hover:text-emerald-400 flex items-center gap-1"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Réinitialiser</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="space-y-1">
+                <label
+                  htmlFor="adv-model-name"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Modèle exact ({builderSettings.provider})
+                </label>
+                <select
+                  id="adv-model-name"
+                  value={builderSettings.modelName}
+                  onChange={(e) =>
+                    updateBuilderSettings({ ...builderSettings, modelName: e.target.value })
+                  }
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  {MODEL_OPTIONS_BY_PROVIDER[builderSettings.provider].map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="adv-framework"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Framework cible
+                </label>
+                <select
+                  id="adv-framework"
+                  value={builderSettings.framework}
+                  onChange={(e) =>
+                    updateBuilderSettings({
+                      ...builderSettings,
+                      framework: e.target.value as TargetFrameworkId,
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  {(Object.keys(FRAMEWORK_LABELS) as TargetFrameworkId[]).map((fw) => (
+                    <option key={fw} value={fw}>
+                      {FRAMEWORK_LABELS[fw]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="space-y-1">
+                <label
+                  htmlFor="adv-template-engine"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Templates
+                </label>
+                <select
+                  id="adv-template-engine"
+                  value={builderSettings.templateEngine}
+                  onChange={(e) =>
+                    updateBuilderSettings({
+                      ...builderSettings,
+                      templateEngine: e.target.value === 'jinja2' ? 'jinja2' : 'handlebars',
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="handlebars">Handlebars</option>
+                  <option value="jinja2">Jinja2</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="adv-db-backend"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Base configs
+                </label>
+                <select
+                  id="adv-db-backend"
+                  value={builderSettings.databaseBackend}
+                  onChange={(e) =>
+                    updateBuilderSettings({
+                      ...builderSettings,
+                      databaseBackend: e.target.value === 'local' ? 'local' : 'postgresql',
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="postgresql">PostgreSQL</option>
+                  <option value="local">Stockage local</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="adv-plan-tier"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Offre SaaS
+                </label>
+                <select
+                  id="adv-plan-tier"
+                  value={builderSettings.planTier}
+                  onChange={(e) =>
+                    updateBuilderSettings({
+                      ...builderSettings,
+                      planTier: e.target.value === 'starter' ? 'starter' : 'pro-saas',
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="pro-saas">Pro SaaS</option>
+                  <option value="starter">Starter</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <label htmlFor="adv-temp" className="font-medium text-slate-700 dark:text-slate-300">
+                    Température
+                  </label>
+                  <span className="font-mono font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
+                    {builderSettings.temperature.toFixed(1)}
+                  </span>
+                </div>
+                <input
+                  id="adv-temp"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={builderSettings.temperature}
+                  onChange={(e) =>
+                    updateBuilderSettings({
+                      ...builderSettings,
+                      temperature: parseFloat(e.target.value),
+                    })
+                  }
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="adv-max-tokens"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Max Tokens
+                </label>
+                <select
+                  id="adv-max-tokens"
+                  value={builderSettings.maxTokens}
+                  onChange={(e) =>
+                    updateBuilderSettings({
+                      ...builderSettings,
+                      maxTokens: Number(e.target.value) || 4096,
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value={1024}>1024 tokens</option>
+                  <option value={2048}>2048 tokens</option>
+                  <option value={4096}>4096 tokens</option>
+                  <option value={8192}>8192 tokens</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-slate-200 dark:border-slate-800" />
+
+          {/* Section Optimisation Agentique (visionia_optimization.json) */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 <h3 className="text-xs font-bold text-slate-900 dark:text-white">
                   Configuration Agentique (visionia_optimization.json)
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => void onUpdateOptimizationConfig(DEFAULT_OPTIMIZATION_CONFIG)}
-                className="text-[11px] font-semibold text-slate-500 hover:text-emerald-700 dark:text-slate-400 dark:hover:text-emerald-400 flex items-center gap-1"
-              >
-                <RotateCcw className="w-3 h-3" />
-                <span>Défaut</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowJsonEditor((prev) => !prev);
+                    setJsonError(null);
+                  }}
+                  className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-300 flex items-center gap-1"
+                >
+                  <FileCode className="w-3.5 h-3.5" />
+                  <span>{showJsonEditor ? 'Masquer JSON' : 'Éditer JSON'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setJsonError(null);
+                    void onUpdateOptimizationConfig(DEFAULT_OPTIMIZATION_CONFIG);
+                    setOptFeedback('Profil AI_Native_Engineer_Assistant (98 %) restauré.');
+                  }}
+                  className="text-[11px] font-semibold text-slate-500 hover:text-emerald-700 dark:text-slate-400 dark:hover:text-emerald-400 flex items-center gap-1"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Défaut</span>
+                </button>
+              </div>
             </div>
 
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              v{optimizationConfig.system_config.version} · Frameworks :{' '}
-              <span className="font-mono text-slate-700 dark:text-slate-300">
-                {optimizationConfig.system_config.active_frameworks.join(' · ')}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+              <span className="font-mono font-semibold text-slate-800 dark:text-slate-200">
+                {optimizationConfig.system_config.profile_name}
               </span>
-            </p>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono tabular-nums">
+                v{optimizationConfig.system_config.version}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono tabular-nums font-semibold text-emerald-700 dark:text-emerald-400">
+                Cible {Math.round(optimizationConfig.system_config.target_accuracy * 100)} %
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono text-slate-600 dark:text-slate-300">
+                {optimizationConfig.system_config.ecosystem.protocols.join(' / ')}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="space-y-1">
+                <label
+                  htmlFor="opt-profile-name"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Profil système actif
+                </label>
+                <input
+                  id="opt-profile-name"
+                  type="text"
+                  value={optimizationConfig.system_config.profile_name}
+                  onChange={(e) =>
+                    void onUpdateOptimizationConfig({
+                      ...optimizationConfig,
+                      system_config: {
+                        ...optimizationConfig.system_config,
+                        profile_name: e.target.value,
+                      },
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <label htmlFor="opt-accuracy" className="font-medium text-slate-700 dark:text-slate-300">
+                    Précision cible
+                  </label>
+                  <span className="font-mono font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
+                    {optimizationConfig.system_config.target_accuracy.toFixed(2)} (
+                    {Math.round(optimizationConfig.system_config.target_accuracy * 100)} %)
+                  </span>
+                </div>
+                <input
+                  id="opt-accuracy"
+                  type="range"
+                  min="0.80"
+                  max="1.00"
+                  step="0.01"
+                  value={optimizationConfig.system_config.target_accuracy}
+                  onChange={(e) =>
+                    void onUpdateOptimizationConfig({
+                      ...optimizationConfig,
+                      system_config: {
+                        ...optimizationConfig.system_config,
+                        target_accuracy: parseFloat(e.target.value),
+                      },
+                    })
+                  }
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
+              </div>
+            </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <div className="space-y-1">
@@ -572,6 +948,77 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {optimizationConfig.system_config.performance_optimizations.eval_loop}
                 </span>
               </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  void onUpdateOptimizationConfig({
+                    ...optimizationConfig,
+                    system_config: {
+                      ...optimizationConfig.system_config,
+                      custom_fields: {
+                        ...optimizationConfig.system_config.custom_fields,
+                        bug_tracking: {
+                          ...optimizationConfig.system_config.custom_fields.bug_tracking,
+                          enabled: !optimizationConfig.system_config.custom_fields.bug_tracking.enabled,
+                        },
+                      },
+                    },
+                  })
+                }
+                className="min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs"
+              >
+                <span className="font-semibold text-slate-800 dark:text-slate-200">
+                  Suivi de bugs (champ)
+                </span>
+                <span
+                  className={`font-mono font-bold ${
+                    optimizationConfig.system_config.custom_fields.bug_tracking.enabled
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  {optimizationConfig.system_config.custom_fields.bug_tracking.enabled
+                    ? 'actif'
+                    : 'inactif'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  void onUpdateOptimizationConfig({
+                    ...optimizationConfig,
+                    system_config: {
+                      ...optimizationConfig.system_config,
+                      custom_fields: {
+                        ...optimizationConfig.system_config.custom_fields,
+                        code_inventory: {
+                          ...optimizationConfig.system_config.custom_fields.code_inventory,
+                          enabled:
+                            !optimizationConfig.system_config.custom_fields.code_inventory.enabled,
+                        },
+                      },
+                    },
+                  })
+                }
+                className="min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs"
+              >
+                <span className="font-semibold text-slate-800 dark:text-slate-200">
+                  Inventaire de code
+                </span>
+                <span
+                  className={`font-mono font-bold ${
+                    optimizationConfig.system_config.custom_fields.code_inventory.enabled
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  {optimizationConfig.system_config.custom_fields.code_inventory.enabled
+                    ? 'actif'
+                    : 'inactif'}
+                </span>
+              </button>
             </div>
 
             <div className="space-y-1">
@@ -597,6 +1044,81 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="w-full p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
               />
             </div>
+
+            {showJsonEditor && (
+              <div className="space-y-2.5 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label
+                    htmlFor="opt-raw-json"
+                    className="text-xs font-semibold text-slate-800 dark:text-slate-200"
+                  >
+                    Schéma brut visionia_optimization.json
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={jsonFileInputRef}
+                      type="file"
+                      accept=".json,application/json"
+                      onChange={handleImportOptimizationFile}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => jsonFileInputRef.current?.click()}
+                      className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-emerald-500 flex items-center gap-1"
+                    >
+                      <Upload className="w-3 h-3" />
+                      <span>Importer .json</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyOptimizationJson()}
+                      className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-emerald-500 flex items-center gap-1"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copier</span>
+                    </button>
+                  </div>
+                </div>
+
+                <textarea
+                  id="opt-raw-json"
+                  rows={9}
+                  value={jsonDraft}
+                  onChange={(e) => {
+                    setJsonDraft(e.target.value);
+                    setJsonError(null);
+                  }}
+                  spellCheck={false}
+                  className="w-full p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] font-mono text-slate-900 dark:text-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+
+                {jsonError && (
+                  <p role="alert" className="text-xs text-rose-600 dark:text-rose-400 font-medium">
+                    {jsonError}
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => void handleApplyRawJsonOptimization()}
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>Confirmer et activer le profil système</span>
+                </button>
+              </div>
+            )}
+
+            {optFeedback && (
+              <p
+                role="status"
+                className="text-xs text-emerald-700 dark:text-emerald-400 font-medium flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5 shrink-0" />
+                <span>{optFeedback}</span>
+              </p>
+            )}
           </div>
 
           <div className="border-t border-slate-200 dark:border-slate-800" />

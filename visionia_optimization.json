@@ -1,13 +1,49 @@
 {
   "system_config": {
-    "version": "1.0.0",
+    "version": "1.1.0",
+    "profile_name": "AI_Native_Engineer_Assistant",
     "mode": "Agentic_Native",
-    "active_frameworks": ["LangGraph", "MCP-Client"],
+    "target_accuracy": 0.98,
+    "active_frameworks": [
+      "LangGraph",
+      "MCP-Client",
+      "RAG-Local"
+    ],
+    "ecosystem": {
+      "runtime_targets": [
+        "AI Hub Local",
+        "Ollama",
+        "Termux"
+      ],
+      "protocols": [
+        "MCP",
+        "RAG"
+      ],
+      "mcp_automation": true
+    },
     "performance_optimizations": {
       "long_term_memory": "enabled",
       "eval_loop": "active",
       "vector_db_access": "Pinecone_Ready"
     },
-    "instruction_priority": "Prioriser l'extraction structurée et l'exécution de tâches autonomes via le protocole MCP."
+    "custom_fields": {
+      "bug_tracking": {
+        "enabled": true,
+        "severity_levels": [
+          "critique",
+          "majeur",
+          "mineur"
+        ]
+      },
+      "code_inventory": {
+        "enabled": true,
+        "track_dependencies": true,
+        "scan_paths": [
+          "src/",
+          "server.ts"
+        ]
+      }
+    },
+    "instruction_priority": "Calibrer AI Hub Local sur le profil AI_Native_Engineer_Assistant (précision cible 98 %) : prioriser l'extraction JSON rigoureuse, le RAG local, l'automatisation MCP, le suivi de bugs et l'inventaire de code."
   }
 }
